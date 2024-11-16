@@ -2,251 +2,375 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 
 #define PORT1 2201
 #define PORT2 2202
 #define BUFFER_SIZE 1024
 #define MAX_PIECES 5
-#define MAX_CELLS 4
 
-// Data structures for game state
-typedef struct {
-    int x[MAX_CELLS];
-    int y[MAX_CELLS];
-} Piece;
+// Error Codes
+#define ERROR_INVALID_PACKET_TYPE_BEGIN 100
+#define ERROR_INVALID_PACKET_TYPE_INIT 101
+#define ERROR_INVALID_PACKET_TYPE_ACTION 102
+
+#define ERROR_INVALID_BEGIN_PARAMS 200
+#define ERROR_INVALID_INIT_PARAMS 201
+#define ERROR_SHOOT_INVALID_PARAMS 202
+
+#define ERROR_INIT_SHAPE_OUT_OF_RANGE 300
+#define ERROR_INIT_ROTATION_OUT_OF_RANGE 301
+#define ERROR_INIT_SHIP_OUT_OF_BOUNDS 302
+#define ERROR_INIT_SHIP_OVERLAP 303
+
+#define ERROR_SHOOT_OUT_OF_BOUNDS 400
+#define ERROR_SHOOT_ALREADY_GUESSED 401
+
+void handle_begin_packet(char *buffer, int client_fd);
+void handle_initialize_packet(char *buffer, int client_fd);
+void handle_shoot_packet(char *buffer, int client_fd);
+void handle_query_packet(int client_fd);
+void handle_forfeit_packet(int client_fd);
+void *handle_client(void *arg);
 
 typedef struct {
-    int width;
-    int height;
-    int player1_ready;
-    int player2_ready;
-    Piece player1_pieces[MAX_PIECES];
-    Piece player2_pieces[MAX_PIECES];
-    int player1_piece_count;
-    int player2_piece_count;
-    int player1_hits;
-    int player2_hits;
-    int player_turn; // 1 or 2
-    int game_over;
+    int width;                          // Board width (set by Player 1)
+    int height;                         // Board height (set by Player 1)
+    int **board;                        // Dynamic 2D array for board
+    int player1_ready;                  // Indicates if Player 1 is ready
+    int player2_ready;                  // Indicates if Player 2 is ready
+    int player1_fd;                     // File descriptor for Player 1
+    int player2_fd;                     // File descriptor for Player 2
+    int player1_pieces[MAX_PIECES][4][2]; // Player 1's ship positions
+    int player2_pieces[MAX_PIECES][4][2]; // Player 2's ship positions
+    int player1_hits;                   // Hits by Player 1
+    int player2_hits;                   // Hits by Player 2
+    int current_turn;                   // Tracks whose turn it is (1 or 2)
 } GameState;
 
-GameState game_state = {0};
-
-// Mutex for thread-safe game state access
+GameState game_state;
 pthread_mutex_t game_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Helper function to parse integers
-int parse_int(const char *str) {
-    return atoi(str);
-}
+// Tetris shapes
+const int piece_shapes[7][4][4][2] = {
+    // Shape 1: Square 
+    {{{0, 0}, {0, 1}, {1, 0}, {1, 1}}, {{0, 0}, {0, 1}, {1, 0}, {1, 1}},
+     {{0, 0}, {0, 1}, {1, 0}, {1, 1}}, {{0, 0}, {0, 1}, {1, 0}, {1, 1}}},
+    // Shape 2: Straight Line 
+    {{{0, 0}, {0, 1}, {0, 2}, {0, 3}}, {{0, 0}, {1, 0}, {2, 0}, {3, 0}},
+     {{0, 0}, {0, 1}, {0, 2}, {0, 3}}, {{0, 0}, {1, 0}, {2, 0}, {3, 0}}},
+    // Shape 3: S
+    {{{0, 0}, {0, 1}, {1, 0}, {1, -1}}, {{0, 0}, {1, 0}, {1, 1}, {2, 1}},
+     {{0, 0}, {0, 1}, {1, 0}, {1, -1}}, {{0, 0}, {1, 0}, {1, 1}, {2, 1}}},
+    // Shape 4: L
+    {{{0, 0}, {1, 0}, {2, 0}, {2, 1}}, {{0, 0}, {0, -1}, {0, -2}, {1, -2}},
+     {{0, 0}, {-1, 0}, {-2, 0}, {-2, -1}}, {{0, 0}, {0, 1}, {0, 2}, {-1, 2}}},
+    // Shape 5: Z
+    {{{0, 0}, {0, -1}, {1, 0}, {1, 1}}, {{0, 0}, {1, 0}, {1, -1}, {2, -1}},
+     {{0, 0}, {0, -1}, {1, 0}, {1, 1}}, {{0, 0}, {1, 0}, {1, -1}, {2, -1}}},
+    // Shape 6: J
+    {{{0, 0}, {1, 0}, {2, 0}, {2, -1}}, {{0, 0}, {0, 1}, {0, 2}, {1, 2}},
+     {{0, 0}, {-1, 0}, {-2, 0}, {-2, 1}}, {{0, 0}, {0, -1}, {0, -2}, {-1, -2}}},
+    // Shape 7: T
+    {{{0, 0}, {0, -1}, {0, 1}, {1, 0}}, {{0, 0}, {-1, 0}, {1, 0}, {0, 1}},
+     {{0, 0}, {0, -1}, {0, 1}, {-1, 0}}, {{0, 0}, {-1, 0}, {1, 0}, {0, -1}}}
+};
 
-// Helper function to check if coordinates are within the board
-int is_within_board(int x, int y) {
-    return x >= 0 && x < game_state.width && y >= 0 && y < game_state.height;
+// Helper Functions
+void send_error_packet(int client_fd, int error_code) {
+    char response[BUFFER_SIZE];
+    snprintf(response, sizeof(response), "E %d", error_code);
+    send(client_fd, response, strlen(response), 0);
 }
+void *handle_client(void *arg) {
+    int client_fd = *(int *)arg;
+    char buffer[BUFFER_SIZE];
+    int player = (client_fd == game_state.player1_fd) ? 1 : 2;
 
-// Packet Handlers
-void handle_begin_packet(char *buffer, int player) {
-    pthread_mutex_lock(&game_state_mutex);
-    if (player == 1) {
-        int width, height;
-        if (sscanf(buffer, "B %d %d", &width, &height) == 2) {
-            game_state.width = width;
-            game_state.height = height;
-            game_state.player1_ready = 1;
-            printf("[Server] Player 1 set board to %dx%d\n", width, height);
-        } else {
-            printf("[Server] Invalid Begin packet from Player 1.\n");
-        }
-    } else {
-        game_state.player2_ready = 1;
-        printf("[Server] Player 2 joined the game.\n");
-    }
-    pthread_mutex_unlock(&game_state_mutex);
-}
+    while (recv(client_fd, buffer, sizeof(buffer), 0) > 0) {
+        pthread_mutex_lock(&game_state_mutex);
 
-void handle_initialize_packet(char *buffer, int player) {
-    pthread_mutex_lock(&game_state_mutex);
-    Piece pieces[MAX_PIECES];
-    int piece_count = 0;
-    char *token = strtok(buffer, " ");
-    if (strcmp(token, "I") != 0) {
-        printf("[Server] Invalid Initialize packet.\n");
-        pthread_mutex_unlock(&game_state_mutex);
-        return;
-    }
-    while ((token = strtok(NULL, " ")) != NULL && piece_count < MAX_PIECES) {
-        int piece_type = parse_int(token);
-        int rotation = parse_int(strtok(NULL, " "));
-        int column = parse_int(strtok(NULL, " "));
-        int row = parse_int(strtok(NULL, " "));
-        if (!is_within_board(column, row)) {
-            printf("[Server] Invalid piece placement for Player %d.\n", player);
+        // Ensure turn-based gameplay
+        if (game_state.player1_ready && game_state.player2_ready && game_state.current_turn != player) {
+            send(client_fd, "WAIT", 4, 0); // Tell the player to wait for their turn
             pthread_mutex_unlock(&game_state_mutex);
-            return;
+            continue;
         }
-        pieces[piece_count].x[0] = column;
-        pieces[piece_count].y[0] = row; // Simplified for illustration
-        piece_count++;
-    }
-    if (player == 1) {
-        memcpy(game_state.player1_pieces, pieces, sizeof(pieces));
-        game_state.player1_piece_count = piece_count;
-        game_state.player1_ready = 1;
-    } else {
-        memcpy(game_state.player2_pieces, pieces, sizeof(pieces));
-        game_state.player2_piece_count = piece_count;
-        game_state.player2_ready = 1;
-    }
-    printf("[Server] Player %d pieces initialized.\n", player);
-    pthread_mutex_unlock(&game_state_mutex);
-}
 
-void handle_shoot_packet(char *buffer, int player, int client_fd) {
-    pthread_mutex_lock(&game_state_mutex);
-    int x, y;
-    if (sscanf(buffer, "S %d %d", &x, &y) != 2 || !is_within_board(x, y)) {
-        send(client_fd, "ERR", strlen("ERR"), 0);
-        pthread_mutex_unlock(&game_state_mutex);
-        return;
-    }
-    int hit = 0;
-    Piece *opponent_pieces = player == 1 ? game_state.player2_pieces : game_state.player1_pieces;
-    int opponent_piece_count = player == 1 ? game_state.player2_piece_count : game_state.player1_piece_count;
-
-    for (int i = 0; i < opponent_piece_count; i++) {
-        for (int j = 0; j < MAX_CELLS; j++) {
-            if (opponent_pieces[i].x[j] == x && opponent_pieces[i].y[j] == y) {
-                hit = 1;
-                if (player == 1) game_state.player1_hits++;
-                else game_state.player2_hits++;
-                break;
+        // Game Phase 1: Begin Packets
+        if (!game_state.player1_ready || !game_state.player2_ready) {
+            if (buffer[0] == 'B') {
+                handle_begin_packet(buffer, client_fd);
+            } else {
+                send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_BEGIN); // E 100
             }
         }
-        if (hit) break;
-    }
-
-    char response[BUFFER_SIZE];
-    sprintf(response, "S %d %d %s", x, y, hit ? "HIT" : "MISS");
-    send(client_fd, response, strlen(response), 0);
-
-    // Check if game over
-    if ((player == 1 && game_state.player1_hits == game_state.player2_piece_count * MAX_CELLS) ||
-        (player == 2 && game_state.player2_hits == game_state.player1_piece_count * MAX_CELLS)) {
-        game_state.game_over = 1;
-        send(client_fd, "H 1", strlen("H 1"), 0);
-    }
-
-    game_state.player_turn = player == 1 ? 2 : 1;
-    pthread_mutex_unlock(&game_state_mutex);
-}
-
-void handle_query_packet(int client_fd) {
-    pthread_mutex_lock(&game_state_mutex);
-    char response[BUFFER_SIZE];
-    sprintf(response, "Q %d %d", game_state.player1_hits, game_state.player2_hits);
-    send(client_fd, response, strlen(response), 0);
-    pthread_mutex_unlock(&game_state_mutex);
-}
-
-void handle_forfeit_packet(int client_fd) {
-    pthread_mutex_lock(&game_state_mutex);
-    printf("[Server] A player forfeited. Game over.\n");
-    send(client_fd, "H 0", strlen("H 0"), 0);
-    game_state.game_over = 1;
-    pthread_mutex_unlock(&game_state_mutex);
-    exit(0); // End server (optional, adjust as needed)
-}
-
-void *handle_client(void *arg) {
-    int client_fd = *((int *)arg);
-    free(arg);
-    char buffer[BUFFER_SIZE];
-
-    while (read(client_fd, buffer, BUFFER_SIZE) > 0) {
-        if (strncmp(buffer, "B", 1) == 0) {
-            handle_begin_packet(buffer, client_fd == PORT1 ? 1 : 2);
-        } else if (strncmp(buffer, "I", 1) == 0) {
-            handle_initialize_packet(buffer, client_fd == PORT1 ? 1 : 2);
-        } else if (strncmp(buffer, "S", 1) == 0) {
-            handle_shoot_packet(buffer, client_fd == PORT1 ? 1 : 2, client_fd);
-        } else if (strncmp(buffer, "Q", 1) == 0) {
-            handle_query_packet(client_fd);
-        } else if (strncmp(buffer, "F", 1) == 0) {
-            handle_forfeit_packet(client_fd);
+        // Game Phase 2: Initialize Packets
+        else if (!game_state.player1_ready || !game_state.player2_ready) {
+            if (buffer[0] == 'I') {
+                handle_initialize_packet(buffer, client_fd);
+            } else {
+                send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_INIT); // E 101
+            }
         }
-        memset(buffer, 0, BUFFER_SIZE);
+        // Game Phase 3: Gameplay (Shoot, Query, Forfeit)
+        else {
+            if (buffer[0] == 'S') {
+                handle_shoot_packet(buffer, client_fd);
+            } else if (buffer[0] == 'Q') {
+                handle_query_packet(client_fd);
+            } else if (buffer[0] == 'F') {
+                handle_forfeit_packet(client_fd);
+                pthread_mutex_unlock(&game_state_mutex);
+                break; // End connection after forfeit
+            } else {
+                send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_ACTION); // E 102
+            }
+        }
+
+        // If it was a shoot packet, switch turns
+        if (buffer[0] == 'S') {
+            game_state.current_turn = (game_state.current_turn == 1) ? 2 : 1;
+        }
+
+        pthread_mutex_unlock(&game_state_mutex);
     }
+
     close(client_fd);
     return NULL;
 }
 
-int main() {
-    int server_fd1, server_fd2, *new_client_fd;
-    struct sockaddr_in address1, address2;
-    int opt = 1;
-    int addrlen = sizeof(struct sockaddr_in);
 
-    // Create sockets for Player 1 and Player 2
-    if ((server_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0 || (server_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("[Server] socket() failed.");
-        exit(EXIT_FAILURE);
+void free_board() {
+    if (game_state.board) {
+        for (int i = 0; i < game_state.height; i++) {
+            free(game_state.board[i]);
+        }
+        free(game_state.board);
+        game_state.board = NULL;
+    }
+}
+
+int is_valid_piece(int type, int rotation) {
+    return (type >= 1 && type <= 7) && (rotation >= 0 && rotation <= 3);
+}
+
+int is_within_board(int col, int row) {
+    return col >= 0 && col < game_state.width && row >= 0 && row < game_state.height;
+}
+
+void place_piece(int shape, int rotation, int row, int col, int cells[4][2]) {
+    for (int i = 0; i < 4; i++) {
+        cells[i][0] = row + piece_shapes[shape - 1][rotation][i][0];
+        cells[i][1] = col + piece_shapes[shape - 1][rotation][i][1];
+    }
+}
+
+int is_valid_placement(int cells[4][2], int height, int width, int **board) {
+    for (int i = 0; i < 4; i++) {
+        int r = cells[i][0];
+        int c = cells[i][1];
+        if (r < 0 || r >= height || c < 0 || c >= width || board[r][c] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Handle Begin Packet
+void handle_begin_packet(char *buffer, int client_fd) {
+    int player = (client_fd == game_state.player1_fd) ? 1 : 2;
+
+    if (player == 1) {
+        int width, height;
+        if (sscanf(buffer, "B %d %d", &width, &height) == 2 && width >= 10 && height >= 10) {
+            free_board();
+            game_state.width = width;
+            game_state.height = height;
+            game_state.board = malloc(height * sizeof(int *));
+            for (int i = 0; i < height; i++) {
+                game_state.board[i] = calloc(width, sizeof(int));
+            }
+            game_state.player1_ready = 1;
+            send(client_fd, "A", 1, 0);
+        } else {
+            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS);
+        }
+    } else if (player == 2) {
+        if (strcmp(buffer, "B") == 0) {
+            game_state.player2_ready = 1;
+            send(client_fd, "A", 1, 0);
+        } else {
+            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS);
+        }
+    }
+}
+// Handle Initialize Packet
+void handle_initialize_packet(char *buffer, int client_fd) {
+    int player = (client_fd == game_state.player1_fd) ? 1 : 2;
+    int (*player_pieces)[4][2] = (player == 1) ? game_state.player1_pieces : game_state.player2_pieces;
+
+    char *token = strtok(buffer, " ");
+    if (!token || strcmp(token, "I") != 0) {
+        send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_INIT);
+        return;
     }
 
-    // Set socket options
-    setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(server_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    for (int i = 0; i < MAX_PIECES; i++) {
+        int type, rotation, row, col;
+        if (!(sscanf(strtok(NULL, " "), "%d", &type) &&
+              sscanf(strtok(NULL, " "), "%d", &rotation) &&
+              sscanf(strtok(NULL, " "), "%d", &col) &&
+              sscanf(strtok(NULL, " "), "%d", &row))) {
+            send_error_packet(client_fd, ERROR_INVALID_INIT_PARAMS);
+            return;
+        }
 
-    // Bind sockets
+        if (!is_valid_piece(type, rotation)) {
+            send_error_packet(client_fd, ERROR_INIT_SHAPE_OUT_OF_RANGE);
+            return;
+        }
+
+        int cells[4][2];
+        place_piece(type, rotation, row, col, cells);
+
+        if (!is_valid_placement(cells, game_state.height, game_state.width, game_state.board)) {
+            send_error_packet(client_fd, ERROR_INIT_SHIP_OUT_OF_BOUNDS);
+            return;
+        }
+
+        for (int j = 0; j < 4; j++) {
+            game_state.board[cells[j][0]][cells[j][1]] = player;
+            memcpy(player_pieces[i], cells, sizeof(cells));
+        }
+    }
+    send(client_fd, "A", 1, 0);
+}
+
+// Handle Shoot Packet
+void handle_shoot_packet(char *buffer, int client_fd) {
+    char *token = strtok(buffer, " ");
+    int row = atoi(strtok(NULL, " "));
+    int col = atoi(strtok(NULL, " "));
+
+    if (row < 0 || row >= game_state.height || col < 0 || col >= game_state.width) {
+        send_error_packet(client_fd, ERROR_SHOOT_OUT_OF_BOUNDS);
+        return;
+    }
+
+    if (game_state.board[row][col] == -1 || game_state.board[row][col] == -2) {
+        send_error_packet(client_fd, ERROR_SHOOT_ALREADY_GUESSED);
+        return;
+    }
+
+    char result = 'M';
+    int opponent = (client_fd == game_state.player1_fd) ? 2 : 1;
+
+    if (game_state.board[row][col] == opponent) {
+        result = 'H';
+        game_state.board[row][col] = -1;
+        if (opponent == 1) game_state.player2_hits++;
+        else game_state.player1_hits++;
+    } else {
+        game_state.board[row][col] = -2;
+    }
+
+    char response[BUFFER_SIZE];
+    snprintf(response, sizeof(response), "R %d %c", MAX_PIECES - ((opponent == 1) ? game_state.player1_hits : game_state.player2_hits), result);
+    send(client_fd, response, strlen(response), 0);
+
+    if ((opponent == 1 ? game_state.player1_hits : game_state.player2_hits) == MAX_PIECES) {
+        send(client_fd, "H 1", 3, 0);
+        send((opponent == 1 ? game_state.player1_fd : game_state.player2_fd), "H 0", 3, 0);
+        free_board();
+        memset(&game_state, 0, sizeof(game_state));
+    }
+}
+
+// Handle Query Packet
+void handle_query_packet(int client_fd) {
+    char response[BUFFER_SIZE];
+    snprintf(response, sizeof(response), "G %d ", MAX_PIECES - ((client_fd == game_state.player1_fd) ? game_state.player2_hits : game_state.player1_hits));
+
+    for (int r = 0; r < game_state.height; r++) {
+        for (int c = 0; c < game_state.width; c++) {
+            if (game_state.board[r][c] == -1) {
+                snprintf(response + strlen(response), sizeof(response) - strlen(response), "H %d %d ", r, c);
+            } else if (game_state.board[r][c] == -2) {
+                snprintf(response + strlen(response), sizeof(response) - strlen(response), "M %d %d ", r, c);
+            }
+        }
+    }
+
+    send(client_fd, response, strlen(response), 0);
+}
+
+// Handle Forfeit Packet
+void handle_forfeit_packet(int client_fd) {
+    int opponent_fd = (client_fd == game_state.player1_fd) ? game_state.player2_fd : game_state.player1_fd;
+
+    send(opponent_fd, "H 1", 3, 0); // Opponent wins
+    send(client_fd, "H 0", 3, 0);  // Current player loses
+
+    free_board();
+    memset(&game_state, 0, sizeof(game_state));
+}
+
+
+
+// Main Function
+int main() {
+    int server_fd1, server_fd2, client_fd1, client_fd2;
+    struct sockaddr_in address1, address2;
+
+    server_fd1 = socket(AF_INET, SOCK_STREAM, 0);
+    server_fd2 = socket(AF_INET, SOCK_STREAM, 0);
+
     address1.sin_family = AF_INET;
     address1.sin_addr.s_addr = INADDR_ANY;
     address1.sin_port = htons(PORT1);
+
     address2.sin_family = AF_INET;
     address2.sin_addr.s_addr = INADDR_ANY;
     address2.sin_port = htons(PORT2);
 
-    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0 ||
-        bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
-        perror("[Server] bind() failed.");
-        exit(EXIT_FAILURE);
-    }
+    bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1));
+    bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2));
 
-    // Listen for connections
-    if (listen(server_fd1, 1) < 0 || listen(server_fd2, 1) < 0) {
-        perror("[Server] listen() failed.");
-        exit(EXIT_FAILURE);
-    }
+    listen(server_fd1, 1);
+    listen(server_fd2, 1);
 
-    printf("[Server] Listening for connections on ports %d and %d...\n", PORT1, PORT2);
+    client_fd1 = accept(server_fd1, NULL, NULL);
+    client_fd2 = accept(server_fd2, NULL, NULL);
 
-    // Accept and handle client connections
-    while (1) {
-        new_client_fd = malloc(sizeof(int));
-        if ((*new_client_fd = accept(server_fd1, (struct sockaddr *)&address1, (socklen_t *)&addrlen)) < 0) {
-            perror("[Server] accept() failed for Player 1.");
-            free(new_client_fd);
-            continue;
-        }
-        printf("[Server] Player 1 connected.\n");
-        pthread_t thread1;
-        pthread_create(&thread1, NULL, handle_client, new_client_fd);
-        pthread_detach(thread1);
+    game_state.player1_fd = client_fd1;
+    game_state.player2_fd = client_fd2;
+    game_state.current_turn = 1;
 
-        new_client_fd = malloc(sizeof(int));
-        if ((*new_client_fd = accept(server_fd2, (struct sockaddr *)&address2, (socklen_t *)&addrlen)) < 0) {
-            perror("[Server] accept() failed for Player 2.");
-            free(new_client_fd);
-            continue;
-        }
-        printf("[Server] Player 2 connected.\n");
-        pthread_t thread2;
-        pthread_create(&thread2, NULL, handle_client, new_client_fd);
-        pthread_detach(thread2);
-    }
+    pthread_t thread1, thread2;
+    pthread_create(&thread1, NULL, handle_client, &client_fd1);
+    pthread_create(&thread2, NULL, handle_client, &client_fd2);
 
+    pthread_join(thread1, NULL);
+    pthread_join(thread2, NULL);
+
+    free_board();
     close(server_fd1);
     close(server_fd2);
+
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

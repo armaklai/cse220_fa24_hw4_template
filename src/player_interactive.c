@@ -64,8 +64,8 @@ int main() {
         }
         
     }
-
-    printf("[Client2] Shutting down.\n");
+    
+printf("[Client2] Shutting down.\n");
     close(client_fd);
     return 0;
 }
