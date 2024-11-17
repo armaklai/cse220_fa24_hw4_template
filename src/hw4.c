@@ -259,11 +259,22 @@ void handle_begin_packet(char *buffer, int client_fd) {
             return;
         }
 
-        game_state.player2_ready = 1;
-        printf("[Server] Player 2 joined the game.\n");
-        send(client_fd, "A", 1, 0); // Acknowledge
+        // Allocate and set Player 2's board using Player 1's dimensions
+        if (game_state.width > 0 && game_state.height > 0) {
+            game_state.player2_board = malloc(game_state.height * sizeof(int *));
+            for (int i = 0; i < game_state.height; i++) {
+                game_state.player2_board[i] = calloc(game_state.width, sizeof(int));
+            }
+            game_state.player2_ready = 1;
+            printf("[Server] Player 2 joined the game with board dimensions %dx%d.\n", game_state.width, game_state.height);
+            send(client_fd, "A", 1, 0); // Acknowledge
+        } else {
+            printf("[Server] Player 2 attempted to join before Player 1 set dimensions.\n");
+            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
+        }
     }
 }
+
 
 
 
