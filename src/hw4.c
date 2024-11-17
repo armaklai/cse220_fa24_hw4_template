@@ -226,10 +226,13 @@ void handle_begin_packet(char *buffer, int client_fd) {
     int player = (client_fd == game_state.player1_fd) ? 1 : 2;
 
     if (player == 1) {
-        int width, height;
+        int width = 0, height = 0;
+        char extra[BUFFER_SIZE];
 
-        // Validate Player 1's Begin packet
-        if (sscanf(buffer, "B %d %d", &width, &height) != 2 || width < 10 || height < 10) {
+        // Strictly validate Player 1's Begin packet
+        if (sscanf(buffer, "B %d %d %s", &width, &height, extra) == 3 || 
+            sscanf(buffer, "B %d %d", &width, &height) != 2 || 
+            width < 10 || height < 10) {
             printf("[Server] Invalid Begin packet from Player 1: %s\n", buffer);
             send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
             return;
@@ -247,8 +250,10 @@ void handle_begin_packet(char *buffer, int client_fd) {
         printf("[Server] Player 1 set board to %dx%d\n", width, height);
         send(client_fd, "A", 1, 0); // Acknowledge
     } else if (player == 2) {
-        // Validate Player 2's Begin packet
-        if (strcmp(buffer, "B") != 0) {
+        char extra[BUFFER_SIZE];
+
+        // Strictly validate Player 2's Begin packet
+        if (sscanf(buffer, "B %s", extra) == 1 || strcmp(buffer, "B") != 0) {
             printf("[Server] Invalid Begin packet from Player 2: %s\n", buffer);
             send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
             return;
@@ -259,6 +264,7 @@ void handle_begin_packet(char *buffer, int client_fd) {
         send(client_fd, "A", 1, 0); // Acknowledge
     }
 }
+
 
 
 
@@ -444,6 +450,7 @@ void handle_forfeit_packet(int client_fd) {
     free_board();
     memset(&game_state, 0, sizeof(game_state));
 }
+
 
 
 int main() {
