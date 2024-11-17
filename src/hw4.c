@@ -49,7 +49,7 @@ typedef struct {
     int current_turn;                   // Tracks whose turn it is (1 or 2)
 } GameState;
 
-GameState game_state;
+GameState game_state; //game_state
 pthread_mutex_t game_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Tetris shapes
@@ -102,6 +102,10 @@ void *handle_client(void *arg) {
         if (!game_state.player1_ready || !game_state.player2_ready) {
             if (buffer[0] == 'B') {
                 handle_begin_packet(buffer, client_fd);
+            } else if (buffer[0] == 'F') {
+                handle_forfeit_packet(client_fd);
+                pthread_mutex_unlock(&game_state_mutex);
+                break; // Game ends immediately on forfeit
             } else {
                 send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_BEGIN); // E 100
             }
@@ -110,6 +114,10 @@ void *handle_client(void *arg) {
         else if (!game_state.player1_ready || !game_state.player2_ready) {
             if (buffer[0] == 'I') {
                 handle_initialize_packet(buffer, client_fd);
+            } else if (buffer[0] == 'F') {
+                handle_forfeit_packet(client_fd);
+                pthread_mutex_unlock(&game_state_mutex);
+                break; // Game ends immediately on forfeit
             } else {
                 send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_INIT); // E 101
             }
