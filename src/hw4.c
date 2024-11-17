@@ -224,32 +224,39 @@ void handle_begin_packet(char *buffer, int client_fd) {
 
     if (player == 1) {
         int width, height;
-        if (sscanf(buffer, "B %d %d", &width, &height) == 2 && width >= 10 && height >= 10) {
-            free_board();
-            game_state.width = width;
-            game_state.height = height;
-            game_state.player1_board = malloc(height * sizeof(int *));
-            for (int i = 0; i < height; i++) {
-                game_state.player1_board[i] = calloc(width, sizeof(int));
-            }
-            game_state.player1_ready = 1;
-            send(client_fd, "A", 1, 0);
-        } else {
-            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS);
+
+        // Validate Player 1's Begin packet
+        if (sscanf(buffer, "B %d %d", &width, &height) != 2 || width < 10 || height < 10) {
+            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
+            return;
         }
+
+        // Set board dimensions
+        game_state.width = width;
+        game_state.height = height;
+
+        // Allocate Player 1's board
+        game_state.player1_board = malloc(height * sizeof(int *));
+        for (int i = 0; i < height; i++) {
+            game_state.player1_board[i] = calloc(width, sizeof(int));
+        }
+
+        game_state.player1_ready = 1;
+        printf("[Server] Player 1 set board to %dx%d\n", width, height);
+        send(client_fd, "A", 1, 0); // Acknowledge
     } else if (player == 2) {
-        if (strcmp(buffer, "B") == 0) {
-            game_state.player2_board = malloc(game_state.height * sizeof(int *));
-            for (int i = 0; i < game_state.height; i++) {
-                game_state.player2_board[i] = calloc(game_state.width, sizeof(int));
-            }
-            game_state.player2_ready = 1;
-            send(client_fd, "A", 1, 0);
-        } else {
-            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS);
+        // Validate Player 2's Begin packet
+        if (strcmp(buffer, "B") != 0) {
+            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
+            return;
         }
+
+        game_state.player2_ready = 1;
+        printf("[Server] Player 2 joined the game.\n");
+        send(client_fd, "A", 1, 0); // Acknowledge
     }
 }
+
 // Handle Initialize Packet
 void handle_initialize_packet(char *buffer, int client_fd) {
     int player = (client_fd == game_state.player1_fd) ? 1 : 2;
