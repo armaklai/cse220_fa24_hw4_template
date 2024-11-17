@@ -91,78 +91,7 @@ void send_error_packet(int client_fd, int error_code) {
     snprintf(response, sizeof(response), "E %d", error_code);
     send(client_fd, response, strlen(response), 0);
 }
-void handle_turn(int client_fd, int player) {
-    static char player1_buffer[BUFFER_SIZE] = {0};
-    static char player2_buffer[BUFFER_SIZE] = {0};
 
-    char buffer[BUFFER_SIZE];
-    memset(buffer, 0, BUFFER_SIZE);
-
-    // Receive input from the player
-    int nbytes = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
-    if (nbytes <= 0) {
-        printf("[Server] Player %d disconnected.\n", player);
-        exit(0);
-    }
-
-    buffer[nbytes] = '\0';
-    printf("[Server] Received from Player %d: %s\n", player, buffer);
-
-    // Buffer the input if it's not the player's turn
-    if (game_state.current_turn != player) {
-        if (player == 1) {
-            strncpy(player1_buffer, buffer, BUFFER_SIZE - 1);
-        } else {
-            strncpy(player2_buffer, buffer, BUFFER_SIZE - 1);
-        }
-        return; // Ignore the input for now
-    }
-
-    // Process buffered input if available
-    if (player == 1 && player1_buffer[0] != '\0') {
-        strncpy(buffer, player1_buffer, BUFFER_SIZE - 1);
-        memset(player1_buffer, 0, BUFFER_SIZE); // Clear the buffer
-    } else if (player == 2 && player2_buffer[0] != '\0') {
-        strncpy(buffer, player2_buffer, BUFFER_SIZE - 1);
-        memset(player2_buffer, 0, BUFFER_SIZE); // Clear the buffer
-    }
-
-    // Process the input
-    if (!game_state.player1_ready || !game_state.player2_ready) {
-        // Begin Phase
-        if (strncmp(buffer, "B", 1) == 0) {
-            handle_begin_packet(buffer, client_fd);
-        } else if (strncmp(buffer, "F", 1) == 0) {
-            handle_forfeit_packet(client_fd);
-            exit(0); // Game ends on forfeit
-        } else {
-            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_BEGIN); // E 100
-        }
-    } else if (!game_state.player1_ready || !game_state.player2_ready) {
-        // Initialize Phase
-        if (strncmp(buffer, "I", 1) == 0) {
-            handle_initialize_packet(buffer, client_fd);
-        } else if (strncmp(buffer, "F", 1) == 0) {
-            handle_forfeit_packet(client_fd);
-            exit(0); // Game ends on forfeit
-        } else {
-            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_INIT); // E 101
-        }
-    } else {
-        // Gameplay Phase
-        if (strncmp(buffer, "S", 1) == 0) {
-            handle_shoot_packet(buffer, client_fd);
-            game_state.current_turn = (player == 1) ? 2 : 1; // Switch turn after valid shoot
-        } else if (strncmp(buffer, "Q", 1) == 0) {
-            handle_query_packet(client_fd);
-        } else if (strncmp(buffer, "F", 1) == 0) {
-            handle_forfeit_packet(client_fd);
-            exit(0); // End game on forfeit
-        } else {
-            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_ACTION); // E 102
-        }
-    }
-}
 
 
 
@@ -229,7 +158,6 @@ void handle_begin_packet(char *buffer, int client_fd) {
         int width = 0, height = 0;
         char extra[BUFFER_SIZE];
 
-        // Strictly validate Player 1's Begin packet
         if (sscanf(buffer, "B %d %d %s", &width, &height, extra) == 3 || 
             sscanf(buffer, "B %d %d", &width, &height) != 2 || 
             width < 10 || height < 10) {
@@ -238,7 +166,6 @@ void handle_begin_packet(char *buffer, int client_fd) {
             return;
         }
 
-        // Set board dimensions for Player 1
         game_state.width = width;
         game_state.height = height;
         game_state.player1_board = malloc(height * sizeof(int *));
@@ -249,31 +176,36 @@ void handle_begin_packet(char *buffer, int client_fd) {
         game_state.player1_ready = 1;
         printf("[Server] Player 1 set board to %dx%d\n", width, height);
         send(client_fd, "A", 1, 0); // Acknowledge
+
+        // If Player 2 is ready, switch to Player 2's turn
+        if (game_state.player2_ready) {
+            game_state.current_turn = 2;
+        }
     } else if (player == 2) {
         char extra[BUFFER_SIZE];
 
-        // Strictly validate Player 2's Begin packet
         if (sscanf(buffer, "B %s", extra) == 1 || strcmp(buffer, "B") != 0) {
             printf("[Server] Invalid Begin packet from Player 2: %s\n", buffer);
             send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
             return;
         }
 
-        // Allocate and set Player 2's board using Player 1's dimensions
-        if (game_state.width > 0 && game_state.height > 0) {
-            game_state.player2_board = malloc(game_state.height * sizeof(int *));
-            for (int i = 0; i < game_state.height; i++) {
-                game_state.player2_board[i] = calloc(game_state.width, sizeof(int));
-            }
-            game_state.player2_ready = 1;
-            printf("[Server] Player 2 joined the game with board dimensions %dx%d.\n", game_state.width, game_state.height);
-            send(client_fd, "A", 1, 0); // Acknowledge
-        } else {
-            printf("[Server] Player 2 attempted to join before Player 1 set dimensions.\n");
-            send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
+        game_state.player2_board = malloc(game_state.height * sizeof(int *));
+        for (int i = 0; i < game_state.height; i++) {
+            game_state.player2_board[i] = calloc(game_state.width, sizeof(int));
+        }
+
+        game_state.player2_ready = 1;
+        printf("[Server] Player 2 joined the game with board dimensions %dx%d.\n", game_state.width, game_state.height);
+        send(client_fd, "A", 1, 0); // Acknowledge
+
+        // If Player 1 is ready, switch to Player 1's turn
+        if (game_state.player1_ready) {
+            game_state.current_turn = 1;
         }
     }
 }
+
 
 
 
