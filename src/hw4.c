@@ -56,7 +56,14 @@ typedef struct {
 GameState game_state; //game_state
 void initialize_game_state() {
     memset(&game_state, 0, sizeof(GameState));
-    game_state.current_turn = 1; // Player 1 starts
+    // Set the current turn to Player 1
+    game_state.current_turn = 1;
+    game_state.player1_board = NULL;
+    game_state.player2_board = NULL;
+    game_state.player1_ready = 0;
+    game_state.player2_ready = 0;
+    game_state.player1_hits = 0;
+    game_state.player2_hits = 0;
 }
 
 
@@ -92,6 +99,70 @@ void send_error_packet(int client_fd, int error_code) {
     send(client_fd, response, strlen(response), 0);
 }
 
+void handle_turn(int client_fd) {
+    char buffer[BUFFER_SIZE];
+    int player = (client_fd == game_state.player1_fd) ? 1 : 2;
+
+    // Receive input from the player
+    if (recv(client_fd, buffer, sizeof(buffer), 0) <= 0) {
+        printf("[Server] Player %d disconnected.\n", player);
+        return;
+    }
+
+    printf("[Server] Received from Player %d: %s\n", player, buffer);
+
+    // Enforce turn-based gameplay
+    if (game_state.current_turn != player) {
+        printf("[Server] Ignoring input from Player %d out of turn.\n", player);
+        return; // Ignore out-of-turn input
+    }
+
+    // Handle input based on the current phase of the game
+    if (!game_state.player1_ready || !game_state.player2_ready) {
+        // Begin phase: Expect Begin or Forfeit
+        if (buffer[0] == 'B') {
+            handle_begin_packet(buffer, client_fd);
+            if (game_state.player1_ready && game_state.player2_ready) {
+                game_state.current_turn = 1; // Start Player 1's turn after Begin phase
+                printf("[Server] Both players ready. Player 1's turn begins.\n");
+            }
+        } else if (buffer[0] == 'F') {
+            handle_forfeit_packet(client_fd);
+        } else {
+            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_BEGIN); // E 100
+        }
+    } else if (game_state.player1_ready == 1 || game_state.player2_ready == 1) {
+        // Initialization phase: Expect Initialize or Forfeit
+        if (buffer[0] == 'I') {
+            handle_initialize_packet(buffer, client_fd);
+            if (game_state.player1_ready == 2 && game_state.player2_ready == 2) {
+                game_state.current_turn = 1; // Start gameplay after Initialization phase
+                printf("[Server] Initialization complete. Player 1's turn begins.\n");
+            }
+        } else if (buffer[0] == 'F') {
+            handle_forfeit_packet(client_fd);
+        } else {
+            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_INIT); // E 101
+        }
+    } else {
+        // Gameplay phase: Expect Shoot, Query, or Forfeit
+        if (buffer[0] == 'S') {
+            handle_shoot_packet(buffer, client_fd);
+        } else if (buffer[0] == 'Q') {
+            handle_query_packet(client_fd);
+        } else if (buffer[0] == 'F') {
+            handle_forfeit_packet(client_fd);
+        } else {
+            send_error_packet(client_fd, ERROR_INVALID_PACKET_TYPE_ACTION); // E 102
+        }
+
+        // Switch turns if a valid Shoot packet was processed
+        if (buffer[0] == 'S') {
+            game_state.current_turn = (game_state.current_turn == 1) ? 2 : 1;
+            printf("[Server] Turn switched to Player %d.\n", game_state.current_turn);
+        }
+    }
+}
 
 
 
@@ -395,66 +466,53 @@ void handle_forfeit_packet(int client_fd) {
 }
 
 
-
 int main() {
     int server_fd1, server_fd2, client_fd1, client_fd2;
     struct sockaddr_in address1, address2;
-    int opt = 1;
+    socklen_t addrlen = sizeof(struct sockaddr_in);
 
-    // Initialize the game state
-    initialize_game_state();
+    // Initialize game state
+    memset(&game_state, 0, sizeof(GameState));
+    game_state.current_turn = 1; // Player 1 starts
 
-    // Create server socket for Player 1
-    if ((server_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
+    // Create server sockets for Player 1 and Player 2
+    if ((server_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0 ||
+        (server_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
-    setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Bind to port 2201
+    // Set socket options
+    int opt = 1;
+    if (setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) ||
+        setsockopt(server_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Bind server sockets to ports 2201 and 2202
     address1.sin_family = AF_INET;
     address1.sin_addr.s_addr = INADDR_ANY;
-    address1.sin_port = htons(PORT1);
+    address1.sin_port = htons(2201);
 
-    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0) {
-        perror("Bind failed for Player 1");
-        exit(EXIT_FAILURE);
-    }
-
-    // Listen for Player 1
-    if (listen(server_fd1, 1) < 0) {
-        perror("Listen failed for Player 1");
-        exit(EXIT_FAILURE);
-    }
-    printf("[Server] Listening for Player 1 on port %d...\n", PORT1);
-
-    // Create server socket for Player 2
-    if ((server_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
-    }
-    setsockopt(server_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Bind to port 2202
     address2.sin_family = AF_INET;
     address2.sin_addr.s_addr = INADDR_ANY;
-    address2.sin_port = htons(PORT2);
+    address2.sin_port = htons(2202);
 
-    if (bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
-        perror("Bind failed for Player 2");
+    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0 ||
+        bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
+        perror("Bind failed");
         exit(EXIT_FAILURE);
     }
 
-    // Listen for Player 2
-    if (listen(server_fd2, 1) < 0) {
-        perror("Listen failed for Player 2");
+    // Start listening on both sockets
+    if (listen(server_fd1, 1) < 0 || listen(server_fd2, 1) < 0) {
+        perror("Listen failed");
         exit(EXIT_FAILURE);
     }
-    printf("[Server] Listening for Player 2 on port %d...\n", PORT2);
 
-    // Accept connections from both players
     printf("[Server] Waiting for Player 1 to connect...\n");
-    if ((client_fd1 = accept(server_fd1, NULL, NULL)) < 0) {
+    if ((client_fd1 = accept(server_fd1, (struct sockaddr *)&address1, &addrlen)) < 0) {
         perror("Accept failed for Player 1");
         exit(EXIT_FAILURE);
     }
@@ -462,32 +520,42 @@ int main() {
     game_state.player1_fd = client_fd1;
 
     printf("[Server] Waiting for Player 2 to connect...\n");
-    if ((client_fd2 = accept(server_fd2, NULL, NULL)) < 0) {
+    if ((client_fd2 = accept(server_fd2, (struct sockaddr *)&address2, &addrlen)) < 0) {
         perror("Accept failed for Player 2");
         exit(EXIT_FAILURE);
     }
     printf("[Server] Player 2 connected.\n");
     game_state.player2_fd = client_fd2;
 
-    // Main game loop
+    // Ensure the server processes inputs correctly
     while (1) {
         if (game_state.current_turn == 1) {
             printf("[Server] Waiting for Player 1's turn...\n");
-            handle_turn(client_fd1, 1);
-        } else {
+            handle_turn(client_fd1);
+        } else if (game_state.current_turn == 2) {
             printf("[Server] Waiting for Player 2's turn...\n");
-            handle_turn(client_fd2, 2);
+            handle_turn(client_fd2);
+        }
+
+        // End the game if all ships are sunk or a player forfeits
+        if (game_state.player1_hits == MAX_PIECES || game_state.player2_hits == MAX_PIECES) {
+            printf("[Server] Game over.\n");
+            break;
         }
     }
 
-    // Clean up
+    // Clean up resources
     close(client_fd1);
     close(client_fd2);
     close(server_fd1);
     close(server_fd2);
     free_board();
+
     return 0;
 }
+
+
+
 
 
 
