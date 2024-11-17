@@ -54,6 +54,10 @@ typedef struct {
 
 
 GameState game_state; //game_state
+void initialize_game_state() {
+    memset(&game_state, 0, sizeof(GameState));
+    game_state.current_turn = 1; // Player 1 starts
+}
 
 
 // Tetris shapes
@@ -218,7 +222,6 @@ int is_ship_sunk(int ship_cells[4][2], int **board) {
     return 1; // All cells are hit
 }
 
-// Handle Begin Packet
 void handle_begin_packet(char *buffer, int client_fd) {
     int player = (client_fd == game_state.player1_fd) ? 1 : 2;
 
@@ -227,15 +230,14 @@ void handle_begin_packet(char *buffer, int client_fd) {
 
         // Validate Player 1's Begin packet
         if (sscanf(buffer, "B %d %d", &width, &height) != 2 || width < 10 || height < 10) {
+            printf("[Server] Invalid Begin packet from Player 1: %s\n", buffer);
             send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
             return;
         }
 
-        // Set board dimensions
+        // Set board dimensions for Player 1
         game_state.width = width;
         game_state.height = height;
-
-        // Allocate Player 1's board
         game_state.player1_board = malloc(height * sizeof(int *));
         for (int i = 0; i < height; i++) {
             game_state.player1_board[i] = calloc(width, sizeof(int));
@@ -247,6 +249,7 @@ void handle_begin_packet(char *buffer, int client_fd) {
     } else if (player == 2) {
         // Validate Player 2's Begin packet
         if (strcmp(buffer, "B") != 0) {
+            printf("[Server] Invalid Begin packet from Player 2: %s\n", buffer);
             send_error_packet(client_fd, ERROR_INVALID_BEGIN_PARAMS); // E 200
             return;
         }
@@ -256,6 +259,8 @@ void handle_begin_packet(char *buffer, int client_fd) {
         send(client_fd, "A", 1, 0); // Acknowledge
     }
 }
+
+
 
 // Handle Initialize Packet
 void handle_initialize_packet(char *buffer, int client_fd) {
@@ -441,77 +446,86 @@ void handle_forfeit_packet(int client_fd) {
 }
 
 
-
-// Main Function
 int main() {
-    printf("[Server] Listening for connections on ports 2201 and 2202...\n");
+    int server_fd1, server_fd2, client_fd1, client_fd2;
+    struct sockaddr_in address1, address2;
+    int opt = 1;
 
-    // Create and bind sockets for Player 1 and Player 2
-    int server_fd1 = socket(AF_INET, SOCK_STREAM, 0);
-    int server_fd2 = socket(AF_INET, SOCK_STREAM, 0);
+    // Initialize the game state
+    initialize_game_state();
 
-    if (server_fd1 == -1 || server_fd2 == -1) {
-        perror("[Server] Socket creation failed");
+    // Create server socket for Player 1
+    if ((server_fd1 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket failed");
         exit(EXIT_FAILURE);
     }
+    setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    struct sockaddr_in address1, address2;
-    memset(&address1, 0, sizeof(address1));
-    memset(&address2, 0, sizeof(address2));
-
+    // Bind to port 2201
     address1.sin_family = AF_INET;
     address1.sin_addr.s_addr = INADDR_ANY;
-    address1.sin_port = htons(2201);
+    address1.sin_port = htons(PORT1);
 
-    address2.sin_family = AF_INET;
-    address2.sin_addr.s_addr = INADDR_ANY;
-    address2.sin_port = htons(2202);
+    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0) {
+        perror("Bind failed for Player 1");
+        exit(EXIT_FAILURE);
+    }
 
-    int opt = 1;
-    setsockopt(server_fd1, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    // Listen for Player 1
+    if (listen(server_fd1, 1) < 0) {
+        perror("Listen failed for Player 1");
+        exit(EXIT_FAILURE);
+    }
+    printf("[Server] Listening for Player 1 on port %d...\n", PORT1);
+
+    // Create server socket for Player 2
+    if ((server_fd2 = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket failed");
+        exit(EXIT_FAILURE);
+    }
     setsockopt(server_fd2, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    if (bind(server_fd1, (struct sockaddr *)&address1, sizeof(address1)) < 0 ||
-        bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
-        perror("[Server] Bind failed");
+    // Bind to port 2202
+    address2.sin_family = AF_INET;
+    address2.sin_addr.s_addr = INADDR_ANY;
+    address2.sin_port = htons(PORT2);
+
+    if (bind(server_fd2, (struct sockaddr *)&address2, sizeof(address2)) < 0) {
+        perror("Bind failed for Player 2");
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd1, 1) < 0 || listen(server_fd2, 1) < 0) {
-        perror("[Server] Listen failed");
+    // Listen for Player 2
+    if (listen(server_fd2, 1) < 0) {
+        perror("Listen failed for Player 2");
         exit(EXIT_FAILURE);
     }
+    printf("[Server] Listening for Player 2 on port %d...\n", PORT2);
 
-    // Accept connections
-    int addrlen1 = sizeof(address1);
-    int addrlen2 = sizeof(address2);
-
-    int client_fd1 = accept(server_fd1, (struct sockaddr *)&address1, (socklen_t *)&addrlen1);
-    if (client_fd1 < 0) {
-        perror("[Server] Player 1 connection failed");
+    // Accept connections from both players
+    printf("[Server] Waiting for Player 1 to connect...\n");
+    if ((client_fd1 = accept(server_fd1, NULL, NULL)) < 0) {
+        perror("Accept failed for Player 1");
         exit(EXIT_FAILURE);
     }
     printf("[Server] Player 1 connected.\n");
+    game_state.player1_fd = client_fd1;
 
-    int client_fd2 = accept(server_fd2, (struct sockaddr *)&address2, (socklen_t *)&addrlen2);
-    if (client_fd2 < 0) {
-        perror("[Server] Player 2 connection failed");
+    printf("[Server] Waiting for Player 2 to connect...\n");
+    if ((client_fd2 = accept(server_fd2, NULL, NULL)) < 0) {
+        perror("Accept failed for Player 2");
         exit(EXIT_FAILURE);
     }
     printf("[Server] Player 2 connected.\n");
-
-    // Initialize the game state
-    game_state.player1_fd = client_fd1;
     game_state.player2_fd = client_fd2;
-    game_state.current_turn = 1;
 
     // Main game loop
     while (1) {
         if (game_state.current_turn == 1) {
-            printf("[Server] Waiting for Player 1's input...\n");
+            printf("[Server] Waiting for Player 1's turn...\n");
             handle_turn(client_fd1, 1);
-        } else if (game_state.current_turn == 2) {
-            printf("[Server] Waiting for Player 2's input...\n");
+        } else {
+            printf("[Server] Waiting for Player 2's turn...\n");
             handle_turn(client_fd2, 2);
         }
     }
@@ -522,9 +536,9 @@ int main() {
     close(server_fd1);
     close(server_fd2);
     free_board();
-
     return 0;
 }
+
 
 
 
