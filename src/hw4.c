@@ -47,6 +47,8 @@ typedef struct {
     int player2_pieces[MAX_PIECES][4][2]; // Player 2's ship positions
     int player1_hits;                   // Hits by Player 1
     int player2_hits;                   // Hits by Player 2
+    int player1_sunk[MAX_PIECES]; // Tracks sunk state for Player 1's ships
+    int player2_sunk[MAX_PIECES]; // Tracks sunk state for Player 2's ships
     int current_turn;                   // Tracks whose turn it is (1 or 2)
 } GameState;
 
@@ -196,6 +198,16 @@ int is_valid_placement(int cells[4][2], int height, int width, int **board) {
     }
     return 1;
 }
+int is_ship_sunk(int ship_cells[4][2], int **board) {
+    for (int i = 0; i < 4; i++) {
+        int r = ship_cells[i][0];
+        int c = ship_cells[i][1];
+        if (board[r][c] != -2) { // Not hit yet
+            return 0;
+        }
+    }
+    return 1; // All cells are hit
+}
 
 // Handle Begin Packet
 void handle_begin_packet(char *buffer, int client_fd) {
@@ -297,8 +309,6 @@ void handle_shoot_packet(char *buffer, int client_fd) {
     }
 
     int row, col;
-
-    // Parse the row and column
     if (!(sscanf(strtok(NULL, " "), "%d", &row) && sscanf(strtok(NULL, " "), "%d", &col))) {
         send_error_packet(client_fd, ERROR_SHOOT_INVALID_PARAMS); // E 202
         return;
@@ -312,7 +322,8 @@ void handle_shoot_packet(char *buffer, int client_fd) {
 
     // Determine which board to shoot at
     int **target_board = (client_fd == game_state.player1_fd) ? game_state.player2_board : game_state.player1_board;
-    int *opponent_hits = (client_fd == game_state.player1_fd) ? &game_state.player2_hits : &game_state.player1_hits;
+    int (*opponent_pieces)[4][2] = (client_fd == game_state.player1_fd) ? game_state.player2_pieces : game_state.player1_pieces;
+    int *opponent_sunk = (client_fd == game_state.player1_fd) ? game_state.player2_sunk : game_state.player1_sunk;
     int opponent_fd = (client_fd == game_state.player1_fd) ? game_state.player2_fd : game_state.player1_fd;
 
     // Check if the cell has already been guessed
@@ -326,19 +337,34 @@ void handle_shoot_packet(char *buffer, int client_fd) {
     if (target_board[row][col] > 0) { // Hit
         result = 'H';
         target_board[row][col] = -2; // Mark as hit
-        (*opponent_hits)++;
+
+        // Check if any ship is fully sunk
+        for (int i = 0; i < MAX_PIECES; i++) {
+            if (!opponent_sunk[i] && is_ship_sunk(opponent_pieces[i], target_board)) {
+                opponent_sunk[i] = 1; // Mark the ship as sunk
+                printf("[Server] Player %d fully sunk a ship!\n", (client_fd == game_state.player1_fd) ? 1 : 2);
+                break; // No need to check further
+            }
+        }
     } else { // Miss
         target_board[row][col] = -1; // Mark as miss
     }
 
+    // Calculate remaining ships
+    int ships_remaining = MAX_PIECES;
+    for (int i = 0; i < MAX_PIECES; i++) {
+        if (opponent_sunk[i]) {
+            ships_remaining--;
+        }
+    }
+
     // Send shot response
     char response[BUFFER_SIZE];
-    int ships_remaining = MAX_PIECES - *opponent_hits;
     snprintf(response, sizeof(response), "R %d %c", ships_remaining, result);
     send(client_fd, response, strlen(response), 0);
 
     // Check if all ships are sunk
-    if (*opponent_hits == MAX_PIECES) {
+    if (ships_remaining == 0) {
         send(client_fd, "H 1", 3, 0); // Winning player
         send(opponent_fd, "H 0", 3, 0); // Losing player
 
@@ -353,6 +379,7 @@ void handle_shoot_packet(char *buffer, int client_fd) {
         game_state.current_turn = (game_state.current_turn == 1) ? 2 : 1;
     }
 }
+
 
 
 // Handle Query Packet
