@@ -73,6 +73,58 @@ int **create_board(int width, int height) {
     }
     return board;
 }
+int is_valid_piece(int type, int rotation) {
+    return (type >= 1 && type <= 7) && (rotation >= 0 && rotation <= 3);
+}
+void place_piece(int type, int rotation, int row, int col, int cells[4][2]) {
+    for (int i = 0; i < 4; i++) {
+        cells[i][0] = row + piece_shapes[type - 1][rotation][i][0];
+        cells[i][1] = col + piece_shapes[type - 1][rotation][i][1];
+    }
+}
+int is_valid_placement(int cells[4][2], int height, int width, int **board) {
+    for (int i = 0; i < 4; i++) {
+        int r = cells[i][0];
+        int c = cells[i][1];
+        if (r < 0 || r >= height || c < 0 || c >= width || board[r][c] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+int setup_server_socket(int port, struct sockaddr_in *addr) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = INADDR_ANY;
+    addr->sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
+        perror("Bind failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_fd, 2) < 0) {
+        perror("Listen failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    return server_fd;
+}
+
 
 void free_board(int **board, int height) {
     for (int i = 0; i < height; i++) {
@@ -100,37 +152,31 @@ void handle_turn(int client_fd) {
     buffer[strcspn(buffer, "\r\n")] = '\0'; // Trim newlines
     printf("[Server] Received from Player %d: %s\n", player, buffer);
 
-    // Setup Phase: Handle independently for both players
     if (!game_state.player1_ready || !game_state.player2_ready) {
+        // Setup Phase
         if (buffer[0] == 'B') {
             handle_begin_packet(buffer, client_fd);
         } else if (buffer[0] == 'I') {
             handle_initialize_packet(buffer, client_fd);
 
-            // If both players are ready after this action, enforce turn-based gameplay
             if (game_state.player1_ready && game_state.player2_ready) {
-                game_state.current_turn = 1; // Start turn-based gameplay with Player 1
-                printf("[Server] Both players ready. Starting gameplay with Player 1.\n");
+                game_state.current_turn = 1; // Start gameplay with Player 1
+                printf("[Server] Both players ready. Starting gameplay.\n");
             }
-        } else if (buffer[0] == 'F') {
-            handle_forfeit_packet(client_fd);
         } else {
-            // Invalid packet during setup phase
             send_error_packet(client_fd, (buffer[0] == 'B' || buffer[0] == 'I') ? 200 : 100);
         }
         return;
     }
 
-    // Gameplay Phase: Enforce turn-based logic
     if (game_state.current_turn != player) {
         printf("[Server] Ignored input from Player %d out of turn.\n", player);
         return;
     }
 
-    // Handle gameplay packets
     if (buffer[0] == 'S') {
         handle_shoot_packet(buffer, client_fd);
-        game_state.current_turn = (game_state.current_turn == 1) ? 2 : 1; // Switch turn
+        game_state.current_turn = (game_state.current_turn == 1) ? 2 : 1; // Switch turns
     } else if (buffer[0] == 'Q') {
         handle_query_packet(client_fd);
     } else if (buffer[0] == 'F') {
@@ -140,42 +186,40 @@ void handle_turn(int client_fd) {
     }
 }
 
+
 void handle_begin_packet(char *buffer, int client_fd) {
     int player = (client_fd == game_state.player1_fd) ? 1 : 2;
 
     if (player == 1) {
         int width, height;
-        // Parse the Begin packet
         if (sscanf(buffer, "B %d %d", &width, &height) == 2) {
-            // Validate board dimensions
             if (width >= 10 && height >= 10) {
-                // Set Player 1's board dimensions
                 game_state.width = width;
                 game_state.height = height;
                 game_state.board1 = create_board(width, height);
                 game_state.player1_ready = 1;
 
                 printf("[Server] Player 1 set board to %dx%d\n", width, height);
-                send(client_fd, "A", 1, 0); // Acknowledge
+                send(client_fd, "A", 1, 0);
             } else {
-                send_error_packet(client_fd, 200); // Invalid Begin packet
+                send_error_packet(client_fd, 200); // Invalid dimensions
             }
         } else {
             send_error_packet(client_fd, 200); // Invalid Begin packet
         }
     } else if (player == 2) {
-        // Player 2 must only send "B" with no parameters
         if (strcmp(buffer, "B") == 0) {
             game_state.board2 = create_board(game_state.width, game_state.height);
             game_state.player2_ready = 1;
 
             printf("[Server] Player 2 joined the game.\n");
-            send(client_fd, "A", 1, 0); // Acknowledge
+            send(client_fd, "A", 1, 0);
         } else {
             send_error_packet(client_fd, 200); // Invalid Begin packet
         }
     }
 }
+
 
 
 
